@@ -1,0 +1,1224 @@
+// ==UserScript==
+// @name         Cine Sharkão
+// @namespace    cine-sharkao
+// @version      2.3.0
+// @description  Miniplayer da live do Kick + filme/conteúdo em tela cheia sincronizado (watch party). Botão de pipoca no menu da Kick.
+// @match        https://kick.com/*
+// @match        https://www.kick.com/*
+// @run-at       document-idle
+// @noframes
+// @require      https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        unsafeWindow
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /* ======================= CONFIG ======================= */
+  const SOCKET_URL = 'wss://watchparty-g6ab.onrender.com';
+  const ROOM_ID = 'meu_canal';
+  const KEY_ENABLED = 'cs_enabled';
+  const KEY_CROP = 'cs_crop_cfg';
+  const GREEN = '#53fc18';
+
+  /* ======================= ESTADO GLOBAL ======================= */
+  let scriptEnabled = GM_getValue(KEY_ENABLED, true);
+  let session = null;
+  let kickBtn = null;
+  let kickBtnHost = null;
+  let noBarTicks = 0;
+  let scanN = 0;
+  let menuIds = [];
+
+  /* ======================= ÍCONE: BALDE DE PIPOCA ======================= */
+  function popcornSVG(size) {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="display:block;pointer-events:none">' +
+      '<g fill="#fde047" stroke="#eab308" stroke-width="0.8">' +
+      '<circle cx="9.3" cy="5.2" r="2.3"/><circle cx="14.7" cy="5.2" r="2.3"/>' +
+      '<circle cx="7.6" cy="8.2" r="2.4"/><circle cx="16.4" cy="8.2" r="2.4"/>' +
+      '<circle cx="12" cy="7" r="3"/></g>' +
+      '<path d="M5.5 10 L8.75 10 L9.6 21 L7.2 21 Z" fill="#ef4444"/>' +
+      '<path d="M8.75 10 L12 10 L12 21 L9.6 21 Z" fill="#fafafa"/>' +
+      '<path d="M12 10 L15.25 10 L14.4 21 L12 21 Z" fill="#ef4444"/>' +
+      '<path d="M15.25 10 L18.5 10 L16.8 21 L14.4 21 Z" fill="#fafafa"/>' +
+      '<rect x="4.6" y="9" width="14.8" height="2.2" rx="1.1" fill="#dc2626"/>' +
+      '</svg>';
+  }
+
+  /* ======================= ESTILOS ======================= */
+  const css =
+    '.cs-kick-btn{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;' +
+    'flex:0 0 auto;margin:0 2px;padding:0;border:none;border-radius:50%;background:transparent;cursor:pointer;' +
+    'transition:background .15s ease;-webkit-tap-highlight-color:transparent;}' +
+    '.cs-kick-btn:hover{background:rgba(255,255,255,.12);}' +
+    '.cs-kick-btn.cs-on{background:rgba(255,255,255,.14);}' +
+    '.cs-kick-btn.cs-float{position:absolute;top:10px;right:10px;z-index:60;background:rgba(0,0,0,.55);opacity:.85;}' +
+    // --- barra de controles ---
+    '#wp-container .cs-b{height:36px;min-width:36px;padding:0 8px;border:0;border-radius:18px;background:transparent;color:#fff;' +
+    'display:flex;align-items:center;justify-content:center;gap:7px;cursor:pointer;flex-shrink:0;box-sizing:border-box;' +
+    'font:600 12px system-ui,-apple-system,sans-serif;-webkit-tap-highlight-color:transparent;transition:background .12s ease,transform .1s ease;}' +
+    '#wp-container .cs-b:active{background:rgba(255,255,255,.2);transform:scale(.93);}' +
+    '#wp-container .cs-b.cs-live{background:rgba(255,255,255,.1);padding:0 12px;}' +
+    '#wp-container .cs-b.cs-act{background:' + GREEN + ';color:#000;}' +
+    '#wp-container .cs-b.cs-sel{background:rgba(255,255,255,.2);}' +
+    '#wp-container .cs-b svg,#wp-container .cs-ti svg{width:20px;height:20px;}' +
+    '#wp-container .cs-vs{width:60px;margin:0 8px 0 0;accent-color:' + GREEN + ';cursor:pointer;touch-action:none;height:4px;}' +
+    '#wp-container .cs-narrow .cs-vs,#wp-container .cs-narrow .cs-lt{display:none;}' +
+    '#wp-container .cs-narrow .cs-b{min-width:32px;padding:0 5px;}' +
+    '@media(hover:hover){#wp-container .cs-b:hover{background:rgba(255,255,255,.14);}}' +
+    // --- menu de ajustes ---
+    '#wp-container .cs-menu{position:absolute;right:10px;bottom:62px;width:280px;max-width:calc(100% - 20px);max-height:calc(100% - 76px);overflow-y:auto;' +
+    'display:none;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px;background:rgba(18,18,22,0.96);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.08);' +
+    'border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,0.65);z-index:1100;box-sizing:border-box;overscroll-behavior:contain;}' +
+    '#wp-container .cs-menu.cs-open{display:grid;}' +
+    '#wp-container .cs-t{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:64px;padding:8px 4px;' +
+    'border:1px solid rgba(255,255,255,0.04);border-radius:12px;background:rgba(255,255,255,0.05);color:#e4e4e7;font:500 11.5px/1.2 system-ui,-apple-system,sans-serif;' +
+    'text-align:center;cursor:pointer;box-sizing:border-box;-webkit-tap-highlight-color:transparent;transition:all .15s ease;}' +
+    '#wp-container .cs-t:active{transform:scale(.95);background:rgba(255,255,255,0.08);}' +
+    '#wp-container .cs-t.cs-g{background:rgba(83,252,24,0.12);border-color:rgba(83,252,24,0.35);color:' + GREEN + ';}' +
+    '#wp-container .cs-t.cs-r{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.35);color:#ef4444;}' +
+    '#wp-container .cs-t.cs-w{grid-column:span 3;flex-direction:row;min-height:46px;padding:0 14px;gap:10px;justify-content:center;color:#fca5a5;background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.25);}' +
+    '#wp-container .cs-ti{display:flex;align-items:center;justify-content:center;}' +
+    '#wp-container .cs-tl{font-weight:600;}' +
+    '#wp-container .cs-ts{font-size:10px;font-weight:400;color:#a1a1aa;}' +
+    '#wp-container .cs-ts:empty{display:none;}' +
+    // --- painel de ajuste de zoom/corte/movimento ---
+    '#wp-container .cs-crop-panel{grid-column:span 3;display:none;flex-direction:column;gap:8px;padding:8px 4px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;}' +
+    '#wp-container .cs-crop-panel.cs-show{display:flex;}' +
+    '#wp-container .cs-crop-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;color:#d4d4d8;}' +
+    '#wp-container .cs-crop-row label{min-width:52px;font-weight:600;color:#a1a1aa;}' +
+    '#wp-container .cs-crop-row input[type="range"]{flex:1;accent-color:' + GREEN + ';height:4px;cursor:pointer;}' +
+    '#wp-container .cs-crop-val{min-width:34px;text-align:right;font-family:monospace;font-size:10.5px;color:' + GREEN + ';}' +
+    '#wp-container .cs-crop-actions{display:flex;gap:6px;margin-top:2px;}' +
+    '#wp-container .cs-crop-btn{flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.07);color:#fff;font:600 11px system-ui,sans-serif;cursor:pointer;text-align:center;}' +
+    '#wp-container .cs-crop-btn:active{transform:scale(.96);}' +
+    '#wp-container .cs-crop-btn.cs-primary{background:rgba(83,252,24,0.16);border-color:rgba(83,252,24,0.4);color:' + GREEN + ';}' +
+    '#wp-thumb-wrapper.cs-editing{outline:2px dashed ' + GREEN + '!important;outline-offset:2px!important;cursor:move!important;}';
+
+  try {
+    if (typeof GM_addStyle === 'function') GM_addStyle(css);
+    else { const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s); }
+  } catch (e) {}
+
+  /* ======================= UTIL ======================= */
+  function getHls() {
+    if (typeof Hls !== 'undefined') return Hls;
+    try { return unsafeWindow.Hls; } catch (e) { return undefined; }
+  }
+
+  function findVideo() {
+    const vids = Array.from(document.querySelectorAll('video')).filter(v => !v.closest('#wp-container'));
+    const vjs = vids.find(v => v.classList.contains('vjs-tech'));
+    if (vjs) return vjs;
+    return vids.sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0] || null;
+  }
+
+  /* ======================= BOTÃO NO MENU DA KICK ======================= */
+  function makeKickButton() {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'cs-kick-btn';
+    b.className = 'cs-kick-btn';
+    b.title = 'Cine Sharkão (ligar/desligar)';
+    b.setAttribute('aria-label', 'Cine Sharkão');
+    b.innerHTML = popcornSVG(22);
+    ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'dblclick'].forEach(ev =>
+      b.addEventListener(ev, e => e.stopPropagation()));
+    b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); toggleSession(); });
+    return b;
+  }
+
+  function renderKickBtn() {
+    if (kickBtn) kickBtn.classList.toggle('cs-on', !!session);
+  }
+
+  function findControlBar(video) {
+    const root = video.closest('.video-js') || video.closest('[class*="player" i]') || video.parentElement;
+    if (!root) return null;
+    const sels = ['.vjs-control-bar', '[class*="control-bar" i]', '[class*="controls" i]'];
+    for (const s of sels) {
+      const el = root.querySelector(s);
+      if (el && !el.closest('#wp-container') && el !== kickBtn) return el;
+    }
+    return null;
+  }
+
+  const ANCHORS = [
+    '[aria-label*="onfigura" i]', '[aria-label*="ettings" i]',
+    '[aria-label*="ualidade" i]', '[aria-label*="uality" i]',
+    '[aria-label*="eatro" i]', '[aria-label*="heat" i]',
+    '.vjs-fullscreen-control', '[aria-label*="ela cheia" i]', '[aria-label*="ullscreen" i]'
+  ];
+
+  function mountInBar(bar) {
+    let first = null;
+    ANCHORS.forEach(sel => {
+      bar.querySelectorAll(sel).forEach(el => {
+        if (el === kickBtn || el.contains(kickBtn)) return;
+        if (!first || (first.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)) first = el;
+      });
+    });
+    kickBtn.classList.remove('cs-float');
+    if (first && first.parentNode) first.parentNode.insertBefore(kickBtn, first);
+    else bar.appendChild(kickBtn);
+    kickBtnHost = bar;
+  }
+
+  function mountFloating(root) {
+    try { if (getComputedStyle(root).position === 'static') root.style.position = 'relative'; } catch (e) {}
+    kickBtn.classList.add('cs-float');
+    root.appendChild(kickBtn);
+    kickBtnHost = root;
+  }
+
+  function removeKickBtn() {
+    if (kickBtn && kickBtn.parentNode) kickBtn.parentNode.removeChild(kickBtn);
+    kickBtnHost = null;
+  }
+
+  function findHeaderAnchor() {
+    const cands = Array.from(document.querySelectorAll('button, a')).filter(el => {
+      if (el === kickBtn || el.closest('#wp-container') || el.closest('.video-js')) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.top >= 0 && r.bottom < 130 && r.width < 90 && r.height < 90 && el.querySelector('svg,img');
+    });
+    if (cands.length < 2) return null;
+    const search = cands.find(el => /search|pesquis|busc/i.test(el.getAttribute('aria-label') || el.title || ''));
+    if (search) return search;
+    cands.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+    return cands[cands.length - 2];
+  }
+
+  function ensureKickButton() {
+    if (session) { renderKickBtn(); return; }
+    if (document.hidden) return;
+    const video = findVideo();
+    if (!video) { removeKickBtn(); noBarTicks = 0; return; }
+    if (!kickBtn) kickBtn = makeKickButton();
+
+    if (kickBtn.isConnected && (scanN = (scanN + 1) % 5)) { renderKickBtn(); return; }
+
+    const anchor = findHeaderAnchor();
+    if (anchor && anchor.parentNode) {
+      noBarTicks = 0;
+      if (kickBtn.isConnected && kickBtnHost === 'header' && kickBtn.nextElementSibling === anchor) { renderKickBtn(); return; }
+      kickBtn.classList.remove('cs-float');
+      anchor.parentNode.insertBefore(kickBtn, anchor);
+      kickBtnHost = 'header';
+      renderKickBtn();
+      return;
+    }
+
+    const bar = findControlBar(video);
+    if (bar) {
+      noBarTicks = 0;
+      if (kickBtn.isConnected && kickBtnHost === bar && bar.contains(kickBtn)) { renderKickBtn(); return; }
+      mountInBar(bar);
+    } else {
+      noBarTicks++;
+      if (noBarTicks < 3) return;
+      const root = video.closest('.video-js') || video.parentElement;
+      if (!root) return;
+      if (kickBtn.isConnected && kickBtnHost === root) { renderKickBtn(); return; }
+      mountFloating(root);
+    }
+    renderKickBtn();
+  }
+
+  /* ======================= MENU DO TAMPERMONKEY ======================= */
+  function registerMenu() {
+    menuIds.forEach(id => { try { GM_unregisterMenuCommand(id); } catch (e) {} });
+    menuIds = [];
+    try {
+      if (scriptEnabled) {
+        menuIds.push(GM_registerMenuCommand(session ? '🍿 Desligar Cine Sharkão (voltar à live)' : '🍿 Ligar Cine Sharkão', toggleSession));
+        menuIds.push(GM_registerMenuCommand('⛔ Desativar script', () => setEnabled(false)));
+      } else {
+        menuIds.push(GM_registerMenuCommand('✅ Ativar script', () => setEnabled(true)));
+      }
+    } catch (e) {}
+  }
+
+  function setEnabled(v) {
+    scriptEnabled = !!v;
+    GM_setValue(KEY_ENABLED, scriptEnabled);
+    if (!scriptEnabled) { stopSession(); removeKickBtn(); }
+    registerMenu();
+    if (scriptEnabled) ensureKickButton();
+  }
+
+  function toggleSession() {
+    if (!scriptEnabled) return;
+    if (session) stopSession();
+    else { startSession(); renderKickBtn(); registerMenu(); }
+  }
+
+  function stopSession() {
+    if (!session) return;
+    const s = session;
+    session = null;
+    try { s.cleanup(); } catch (e) {}
+    renderKickBtn();
+    registerMenu();
+  }
+
+  /* ======================= PLAYER ======================= */
+  function startSession() {
+    try {
+      const nativeVideo = findVideo();
+      if (!nativeVideo) { alert('Entre na aba da live da Kick primeiro!'); return; }
+
+      const parent = nativeVideo.parentElement;
+      const origNext = nativeVideo.nextSibling;
+      const origVideoStyle = nativeVideo.getAttribute('style');
+      const origParentStyle = parent ? parent.getAttribute('style') : null;
+
+      const timers = [];
+      let alive = true;
+      let lastSeekAt = -Infinity;
+      let chatLoaded = false;
+      const hiddenEls = [];
+      let dragRaf = 0;
+      let resizeObs = null;
+      let lightMode = false;
+      let wakeLock = null;
+
+      const addInterval = (fn, ms) => { const id = setInterval(fn, ms); timers.push(id); return id; };
+
+      function restoreKickPage() {
+        while (hiddenEls.length) {
+          const it = hiddenEls.pop();
+          try {
+            if (it[1]) it[0].style.setProperty('display', it[1], it[2]);
+            else it[0].style.removeProperty('display');
+          } catch (e) {}
+        }
+      }
+
+      function hideKickPage() {
+        try {
+          const before = parent.getBoundingClientRect();
+          let node = parent;
+          while (node && node !== document.body && node.parentElement) {
+            const p = node.parentElement;
+            Array.from(p.children).forEach(sib => {
+              if (sib === node || sib.id === 'wp-container') return;
+              const tag = sib.tagName;
+              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') return;
+              hiddenEls.push([sib, sib.style.getPropertyValue('display'), sib.style.getPropertyPriority('display')]);
+              sib.style.setProperty('display', 'none', 'important');
+            });
+            node = p;
+          }
+          const after = parent.getBoundingClientRect();
+          if (after.width < before.width * 0.9 || after.height < before.height * 0.9 || after.height < 80) restoreKickPage();
+        } catch (e) { restoreKickPage(); }
+      }
+
+      let socket = null;
+      let hlsInstance = null;
+      let currentUrl = null;
+      let pendingUrl = null;
+      let connectionState = 'connecting';
+      let lastServerTime = null;
+      let lastServerTimeReceivedAt = 0;
+      let isPlayingFromSocket = false;
+      const viewerDelay = 4;
+      let isChatOpen = false;
+      let preChatPosX = null;
+      const smallW = 200, largeW = 320;
+      let currentW = smallW;
+      let currentH = Math.round(smallW * 9 / 16);
+      let isExpanded = false;
+      let posX = 0, posY = 0;
+      let hideTimer = null;
+      let controlsVisible = true;
+      let lastShowAt = 0;
+      let menuOpen = false;
+      const EDGE = 8;
+      const RADIUS = 14;
+
+      // Estado de zoom, corte e posição interna do miniplayer
+      const DEFAULT_CROP = { zoom: 2.2, x: -5, y: -45, aspect: 16 / 9 };
+      let cropCfg = Object.assign({}, DEFAULT_CROP, GM_getValue(KEY_CROP, {}));
+      let isEditingCrop = false;
+
+      function getZoomCSS() {
+        return 'position:absolute!important;' +
+          'top:' + cropCfg.y + '%!important;' +
+          'left:' + cropCfg.x + '%!important;' +
+          'width:100%!important;' +
+          'height:100%!important;' +
+          'transform:scale(' + cropCfg.zoom + ')!important;' +
+          'transform-origin:0% 0%!important;' +
+          'border:none!important;' +
+          'box-shadow:none!important;' +
+          'pointer-events:none!important;';
+      }
+
+      function applyCropStyle() {
+        nativeVideo.style.cssText = getZoomCSS();
+        currentW = isExpanded ? largeW : smallW;
+        currentH = Math.round(currentW / cropCfg.aspect);
+        if (typeof thumbWrapper !== 'undefined') updateTransform(false);
+        try { GM_setValue(KEY_CROP, cropCfg); } catch (e) {}
+      }
+
+      let meta = document.querySelector('meta[name="viewport"]');
+      let metaCreated = false;
+      const origMetaContent = meta ? meta.getAttribute('content') : null;
+      if (!meta) { meta = document.createElement('meta'); meta.name = 'viewport'; document.head.appendChild(meta); metaCreated = true; }
+      meta.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content');
+
+      if ('wakeLock' in navigator) {
+        try { navigator.wakeLock.request('screen').then(l => { wakeLock = l; if (!alive) { try { l.release(); } catch (e) {} } }).catch(() => {}); } catch (e) {}
+      }
+
+      if (parent) parent.style.cssText = 'position:relative!important;width:100%!important;height:100%!important;';
+
+      /* ---------- containers ---------- */
+      const wpContainer = document.createElement('div');
+      wpContainer.id = 'wp-container';
+      wpContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:900;background:#000000;display:flex;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;';
+
+      const contentLayout = document.createElement('div');
+      contentLayout.style.cssText = 'flex:1;display:flex;flex-direction:row;position:relative;width:100%;height:100%;overflow:hidden;';
+
+      const vidWrapper = document.createElement('div');
+      vidWrapper.style.cssText = 'flex:1;position:relative;width:100%;height:100%;overflow:hidden;background:#000;';
+
+      const wpVideo = document.createElement('video');
+      wpVideo.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+      wpVideo.playsInline = true;
+      wpVideo.setAttribute('playsinline', 'true');
+      wpVideo.setAttribute('webkit-playsinline', 'true');
+      wpVideo.preload = 'auto';
+      vidWrapper.appendChild(wpVideo);
+
+      const safeLayer = document.createElement('div');
+      safeLayer.id = 'wp-safe-layer';
+      safeLayer.style.cssText = 'position:absolute!important;top:0!important;left:0!important;width:100%!important;height:100%!important;pointer-events:none!important;z-index:999!important;overflow:hidden!important;';
+      vidWrapper.appendChild(safeLayer);
+      contentLayout.appendChild(vidWrapper);
+
+      /* ---------- chat ---------- */
+      const pathSegments = window.location.pathname.split('/');
+      const channelName = pathSegments[1] || 'live';
+      const CHAT_WIDTH = 395;
+      const chatPanel = document.createElement('div');
+      chatPanel.id = 'wp-chat-panel';
+      chatPanel.style.cssText = 'display:block;width:' + CHAT_WIDTH + 'px;height:100%;background:#0b0b0e;border-left:1px solid #1f1f23;box-sizing:border-box;z-index:910;flex-shrink:0;margin-right:-' + CHAT_WIDTH + 'px;';
+      const chatIframe = document.createElement('iframe');
+      chatIframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
+      function loadChat() {
+        if (chatLoaded) return;
+        chatLoaded = true;
+        chatIframe.src = 'https://kick.com/popout/' + channelName + '/chat?dark_mode=true';
+      }
+      chatPanel.appendChild(chatIframe);
+      contentLayout.appendChild(chatPanel);
+      wpContainer.appendChild(contentLayout);
+
+      /* ---------- barra de controles ---------- */
+      const controls = document.createElement('div');
+      controls.style.cssText = 'position:absolute;bottom:0;left:0;width:100%;height:52px;background:linear-gradient(to top,rgba(10,10,12,0.95),rgba(10,10,12,0.72));display:flex;align-items:center;justify-content:space-between;padding:0 8px 0 12px;color:#fff;box-sizing:border-box;z-index:920;transition:opacity 0.25s ease;';
+
+      const ico = inner => '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+      const ICON_CHAT = ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>');
+      const ICON_MIC = ico('<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line>');
+      const ICON_MIC_OFF = ico('<line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line>');
+      const SPK = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>';
+      const ICON_VOL_2 = ico(SPK + '<path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>');
+      const ICON_VOL_1 = ico(SPK + '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>');
+      const ICON_VOL_X = ico(SPK + '<line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>');
+      const ICON_ZAP = ico('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>');
+      const ICON_CAM = ico('<polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>');
+      const ICON_CAM_OFF = ico('<path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"></path><line x1="1" y1="1" x2="23" y2="23"></line>');
+      const ICON_FS = ico('<path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>');
+      const ICON_FS_OFF = ico('<path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path>');
+      const ICON_SET = ico('<line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line>');
+      const ICON_SYNC = ico('<polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>');
+      const ICON_CROP = ico('<path d="M6.13 1L6 16a2 2 0 0 0 2 2h15"></path><path d="M1 6.13L16 6a2 2 0 0 1 2 2v15"></path>');
+
+      function mkBtn(cls, title, html) {
+        const b = document.createElement('button');
+        b.className = 'cs-b' + (cls ? ' ' + cls : '');
+        b.title = title;
+        if (html) b.innerHTML = html;
+        return b;
+      }
+
+      const leftGroup = document.createElement('div');
+      leftGroup.style.cssText = 'display:flex;align-items:center;gap:4px;height:36px;flex-shrink:0;';
+
+      const syncStatus = document.createElement('div');
+      syncStatus.id = 'wp-sync-status';
+      syncStatus.title = 'Status da Conexão (toque para reconectar)';
+      syncStatus.innerHTML = '<span style="width:9px;height:9px;background:#eab308;border-radius:50%;display:inline-block;box-shadow:0 0 6px rgba(234,179,8,0.7);"></span>';
+      syncStatus.style.cssText = 'width:26px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;box-sizing:border-box;';
+      function reconnect() {
+        connectionState = 'connecting';
+        if (socket) { socket.onclose = null; try { socket.close(); } catch (e) {} }
+        connectSocket();
+      }
+      syncStatus.onclick = reconnect;
+
+      const timeRemaining = document.createElement('div');
+      timeRemaining.id = 'wp-time-remaining';
+      timeRemaining.textContent = '00:00:00';
+      timeRemaining.style.cssText = 'color:#e4e4e7;font-size:12px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;letter-spacing:0.5px;';
+      let lastTimeText = '';
+      function updateTime() {
+        if (isNaN(wpVideo.duration) || !isFinite(wpVideo.duration) || isNaN(wpVideo.currentTime)) return;
+        const rem = Math.max(0, wpVideo.duration - wpVideo.currentTime);
+        const h = Math.floor(rem / 3600), m = Math.floor((rem % 3600) / 60), s = Math.floor(rem % 60);
+        const txt = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+        if (txt !== lastTimeText) { lastTimeText = txt; timeRemaining.textContent = txt; }
+      }
+      wpVideo.ontimeupdate = () => { if (controlsVisible) updateTime(); };
+      leftGroup.appendChild(syncStatus);
+      leftGroup.appendChild(timeRemaining);
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;align-items:center;gap:4px;flex-shrink:0;';
+
+      function updateTransform(withTransition) {
+        thumbWrapper.style.transition = withTransition ? 'transform 0.2s ease' : 'none';
+        thumbWrapper.style.width = currentW + 'px';
+        thumbWrapper.style.height = currentH + 'px';
+        thumbWrapper.style.transform = 'translate3d(' + posX + 'px, ' + posY + 'px, 0)';
+      }
+
+      function snapToEdge() {
+        const maxW = vidWrapper.clientWidth, maxH = vidWrapper.clientHeight;
+        const rightX = Math.max(EDGE, maxW - currentW - EDGE);
+        if (posX - EDGE < rightX - posX) posX = EDGE; else posX = rightX;
+        posY = Math.max(EDGE, Math.min(maxH - currentH - EDGE, posY));
+        updateTransform(true);
+      }
+
+      const chatBtn = mkBtn('', 'Chat', ICON_CHAT);
+      chatBtn.style.display = 'none';
+
+      let edgeZone = null, closeZone = null;
+      function syncZones() {
+        if (edgeZone) edgeZone.style.display = isChatOpen ? 'none' : 'block';
+        if (closeZone) closeZone.style.display = isChatOpen ? 'block' : 'none';
+      }
+      function setChatBtn(on) { chatBtn.classList.toggle('cs-act', !!on); }
+      function chatSlide(open, animated) {
+        chatPanel.style.transition = animated ? 'margin-right 0.24s cubic-bezier(0.22,0.61,0.36,1)' : 'none';
+        chatPanel.style.marginRight = open ? '0px' : '-' + CHAT_WIDTH + 'px';
+      }
+      function adjustThumbForChat(open) {
+        const full = contentLayout.clientWidth;
+        if (open) {
+          const w = full - CHAT_WIDTH;
+          if (posX + currentW + EDGE > w) {
+            preChatPosX = posX;
+            posX = Math.max(EDGE, w - currentW - EDGE);
+            updateTransform(true);
+          }
+        } else if (preChatPosX !== null) {
+          posX = Math.max(EDGE, Math.min(preChatPosX, full - currentW - EDGE));
+          preChatPosX = null;
+          updateTransform(true);
+        }
+      }
+      function openChat() {
+        if (isChatOpen) return;
+        loadChat();
+        isChatOpen = true; setChatBtn(true); syncZones(); chatSlide(true, true); adjustThumbForChat(true);
+      }
+      function closeChat(animated) {
+        if (!isChatOpen) return;
+        isChatOpen = false; setChatBtn(false); syncZones(); chatSlide(false, !!animated);
+        chatPanel.style.height = '100%';
+        adjustThumbForChat(false);
+      }
+      chatBtn.onclick = () => { if (isChatOpen) { closeChat(true); return; } openChat(); };
+
+      const SWIPE_MIN = 35, ZONE_W = 55;
+      const isLandscape = () => window.innerWidth > window.innerHeight;
+
+      edgeZone = document.createElement('div');
+      edgeZone.id = 'wp-edge-zone';
+      edgeZone.style.cssText = 'position:absolute;top:0;right:0;width:' + ZONE_W + 'px;height:calc(100% - 52px);z-index:1000;touch-action:none;';
+      closeZone = document.createElement('div');
+      closeZone.id = 'wp-close-zone';
+      closeZone.style.cssText = 'display:none;position:absolute;top:0;right:' + CHAT_WIDTH + 'px;width:' + ZONE_W + 'px;height:calc(100% - 52px);z-index:1000;touch-action:none;';
+      wpContainer.appendChild(edgeZone);
+      wpContainer.appendChild(closeZone);
+      syncZones();
+
+      let gOn = false, gX = 0, gD = 0, gRaf = 0;
+      function gApply() { gRaf = 0; chatPanel.style.marginRight = '-' + (CHAT_WIDTH - gD) + 'px'; }
+      edgeZone.addEventListener('pointerdown', e => {
+        if (isChatOpen || !isLandscape()) return;
+        gOn = true; gX = e.clientX; gD = 0;
+        loadChat();
+        chatPanel.style.transition = 'none';
+        try { edgeZone.setPointerCapture(e.pointerId); } catch (err) {}
+        e.preventDefault();
+      });
+      edgeZone.addEventListener('pointermove', e => {
+        if (!gOn) return;
+        gD = Math.max(0, Math.min(CHAT_WIDTH, gX - e.clientX));
+        if (!gRaf) gRaf = requestAnimationFrame(gApply);
+      });
+      function gEnd(cancelled) {
+        if (!gOn) return;
+        gOn = false;
+        if (gRaf) { cancelAnimationFrame(gRaf); gRaf = 0; }
+        if (cancelled) gD = 0;
+        gApply();
+        void chatPanel.offsetWidth;
+        if (gD >= SWIPE_MIN) openChat(); else chatSlide(false, true);
+      }
+      edgeZone.addEventListener('pointerup', e => { try { edgeZone.releasePointerCapture(e.pointerId); } catch (err) {} gEnd(false); });
+      edgeZone.addEventListener('pointercancel', () => gEnd(true));
+      edgeZone.addEventListener('click', e => e.stopPropagation());
+
+      let cOn = false, cX = 0;
+      closeZone.addEventListener('pointerdown', e => {
+        if (!isChatOpen || !isLandscape()) return;
+        cOn = true; cX = e.clientX;
+        try { closeZone.setPointerCapture(e.pointerId); } catch (err) {}
+        e.preventDefault();
+      });
+      closeZone.addEventListener('pointermove', e => {
+        if (!cOn) return;
+        if (Math.abs(e.clientX - cX) >= SWIPE_MIN) { cOn = false; closeChat(true); }
+      });
+      closeZone.addEventListener('pointerup', () => { cOn = false; });
+      closeZone.addEventListener('pointercancel', () => { cOn = false; });
+      closeZone.addEventListener('click', e => e.stopPropagation());
+
+      /* ---------- menu de ajustes ---------- */
+      const menu = document.createElement('div');
+      menu.className = 'cs-menu';
+
+      function mkTile(label, title, onClick) {
+        const t = document.createElement('button');
+        t.className = 'cs-t';
+        t.title = title;
+        t.innerHTML = '<span class="cs-ti"></span><span class="cs-tl">' + label + '</span><span class="cs-ts"></span>';
+        t.i = t.firstChild; t.s = t.lastChild;
+        t.onclick = onClick;
+        menu.appendChild(t);
+        return t;
+      }
+      function setTile(t, mode, icon) {
+        const c = 'cs-t' + (mode ? ' ' + mode : '');
+        if (t.className !== c) t.className = c;
+        if (icon && t.i._k !== icon) { t.i._k = icon; t.i.innerHTML = icon; }
+      }
+
+      let miniHidden = false;
+      const tMini = mkTile('Miniplayer', 'Mostrar ou esconder o miniplayer', () => { miniHidden = !miniHidden; renderMini(); });
+      function renderMini() {
+        setTile(tMini, miniHidden ? 'cs-r' : 'cs-g', miniHidden ? ICON_CAM_OFF : ICON_CAM);
+        thumbWrapper.style.setProperty('visibility', miniHidden ? 'hidden' : 'visible', 'important');
+      }
+
+      const tMic = mkTile('Voz da live', 'Mutar Voz do Streamer', () => { nativeVideo.muted = !nativeVideo.muted; renderMute(); });
+      function renderMute() { setTile(tMic, nativeVideo.muted ? 'cs-r' : 'cs-g', nativeVideo.muted ? ICON_MIC_OFF : ICON_MIC); }
+      renderMute();
+
+      const tLight = mkTile('Modo leve', 'Modo leve (esconde a página da Kick)', () => {
+        lightMode = !lightMode;
+        if (lightMode) { hideKickPage(); if (!hiddenEls.length) lightMode = false; }
+        else restoreKickPage();
+        renderLight();
+      });
+      function renderLight() { setTile(tLight, lightMode ? 'cs-g' : '', ICON_ZAP); }
+      renderLight();
+
+      const SYNC_TXT = { '#eab308': 'Conectando', '#ef4444': 'Desconectado', '#a1a1aa': 'Em espera', '#38bdf8': 'Ajustando', '#53fc18': 'Sincronizado' };
+      const tSync = mkTile('Sincronia', 'Reconectar à sala', reconnect);
+      setTile(tSync, '', ICON_SYNC);
+
+      // --- Novo botão: Ajustar Corte / Zoom / Posição interna ---
+      const tCrop = mkTile('Enquadrar', 'Cortar, dar zoom e mover a imagem dentro do miniplayer', () => {
+        isEditingCrop = !isEditingCrop;
+        renderCropState();
+      });
+      setTile(tCrop, '', ICON_CROP);
+      tCrop.s.textContent = 'Zoom/Corte';
+
+      // Painel expansível dentro do menu de ajustes
+      const cropPanel = document.createElement('div');
+      cropPanel.className = 'cs-crop-panel';
+
+      function mkSliderRow(label, min, max, step, val, unit, onChange) {
+        const row = document.createElement('div');
+        row.className = 'cs-crop-row';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = val;
+        const span = document.createElement('span');
+        span.className = 'cs-crop-val';
+        span.textContent = val + unit;
+        inp.oninput = () => {
+          const v = parseFloat(inp.value);
+          span.textContent = v + unit;
+          onChange(v);
+        };
+        row.appendChild(lbl);
+        row.appendChild(inp);
+        row.appendChild(span);
+        cropPanel.appendChild(row);
+        return { inp, span, unit };
+      }
+
+      const slZoom = mkSliderRow('Zoom', 1.0, 4.0, 0.05, cropCfg.zoom, 'x', v => { cropCfg.zoom = v; applyCropStyle(); });
+      const slX = mkSliderRow('Posição X', -150, 50, 1, cropCfg.x, '%', v => { cropCfg.x = v; applyCropStyle(); });
+      const slY = mkSliderRow('Posição Y', -150, 50, 1, cropCfg.y, '%', v => { cropCfg.y = v; applyCropStyle(); });
+
+      // Botões de formato (corte) + resetar
+      const cropActions = document.createElement('div');
+      cropActions.className = 'cs-crop-actions';
+
+      const btnAspect = document.createElement('button');
+      btnAspect.className = 'cs-crop-btn cs-primary';
+      function getAspectLabel() {
+        if (Math.abs(cropCfg.aspect - 16/9) < 0.05) return 'Corte: 16:9';
+        if (Math.abs(cropCfg.aspect - 4/3) < 0.05) return 'Corte: 4:3';
+        return 'Corte: 1:1';
+      }
+      btnAspect.textContent = getAspectLabel();
+      btnAspect.onclick = () => {
+        if (Math.abs(cropCfg.aspect - 16/9) < 0.05) cropCfg.aspect = 4/3;
+        else if (Math.abs(cropCfg.aspect - 4/3) < 0.05) cropCfg.aspect = 1;
+        else cropCfg.aspect = 16/9;
+        btnAspect.textContent = getAspectLabel();
+        applyCropStyle();
+        snapToEdge();
+      };
+
+      const btnResetCrop = document.createElement('button');
+      btnResetCrop.className = 'cs-crop-btn';
+      btnResetCrop.textContent = 'Resetar';
+      btnResetCrop.onclick = () => {
+        cropCfg = Object.assign({}, DEFAULT_CROP);
+        slZoom.inp.value = cropCfg.zoom; slZoom.span.textContent = cropCfg.zoom + slZoom.unit;
+        slX.inp.value = cropCfg.x; slX.span.textContent = cropCfg.x + slX.unit;
+        slY.inp.value = cropCfg.y; slY.span.textContent = cropCfg.y + slY.unit;
+        btnAspect.textContent = getAspectLabel();
+        applyCropStyle();
+        snapToEdge();
+      };
+
+      cropActions.appendChild(btnAspect);
+      cropActions.appendChild(btnResetCrop);
+      cropPanel.appendChild(cropActions);
+
+      const hintNote = document.createElement('div');
+      hintNote.style.cssText = 'font-size:10px;color:#a1a1aa;text-align:center;margin-top:2px;';
+      hintNote.textContent = 'Dica: arraste direto no miniplayer para mover o vídeo';
+      cropPanel.appendChild(hintNote);
+
+      menu.appendChild(cropPanel);
+
+      function renderCropState() {
+        setTile(tCrop, isEditingCrop ? 'cs-g' : '', ICON_CROP);
+        tCrop.s.textContent = isEditingCrop ? 'Editando' : 'Zoom/Corte';
+        cropPanel.classList.toggle('cs-show', isEditingCrop);
+        if (typeof thumbWrapper !== 'undefined') thumbWrapper.classList.toggle('cs-editing', isEditingCrop);
+      }
+
+      const tPower = mkTile('Desligar Cine Sharkão', 'Desligar Cine Sharkão (voltar à live)', () => stopSession());
+      tPower.className = 'cs-t cs-w';
+      tPower.i.innerHTML = popcornSVG(20);
+      menu.addEventListener('pointerdown', () => showControls());
+      wpContainer.appendChild(menu);
+
+      const gearBtn = mkBtn('', 'Ajustes', ICON_SET);
+      function closeMenu() {
+        if (!menuOpen) return;
+        menuOpen = false;
+        isEditingCrop = false;
+        renderCropState();
+        menu.classList.remove('cs-open');
+        gearBtn.classList.remove('cs-sel');
+      }
+      function toggleMenu() {
+        if (menuOpen) { closeMenu(); return; }
+        menuOpen = true;
+        menu.classList.add('cs-open');
+        gearBtn.classList.add('cs-sel');
+        updateStatus();
+      }
+      gearBtn.onclick = toggleMenu;
+
+      /* ---------- Ao Vivo ---------- */
+      const liveBtn = mkBtn('cs-live', 'Voltar para o ao vivo');
+      const liveDotEl = document.createElement('span');
+      liveDotEl.style.cssText = 'width:8px;height:8px;background:#ef4444;border-radius:50%;display:inline-block;box-shadow:0 0 5px rgba(239,68,68,0.6);';
+      const liveText = document.createElement('span');
+      liveText.className = 'cs-lt';
+      liveText.textContent = 'Ao Vivo';
+      liveText.style.cssText = 'color:#e4e4e7;font-size:12px;font-weight:600;';
+      liveBtn.appendChild(liveDotEl);
+      liveBtn.appendChild(liveText);
+      liveBtn.onclick = () => {
+        try {
+          if (nativeVideo.seekable && nativeVideo.seekable.length > 0) nativeVideo.currentTime = nativeVideo.seekable.end(nativeVideo.seekable.length - 1);
+          else if (nativeVideo.buffered && nativeVideo.buffered.length > 0) nativeVideo.currentTime = nativeVideo.buffered.end(nativeVideo.buffered.length - 1);
+          if ((document.fullscreenElement || document.webkitFullscreenElement) && screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+        } catch (e) {}
+      };
+
+      /* ---------- volume do filme ---------- */
+      const volContainer = document.createElement('div');
+      volContainer.style.cssText = 'height:36px;display:flex;align-items:center;flex-shrink:0;';
+      const speakerBtn = mkBtn('', 'Volume do filme');
+      const volSlider = document.createElement('input');
+      volSlider.className = 'cs-vs';
+      volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.05'; volSlider.value = '1';
+      let lastVolIcon = '';
+      function renderVol() {
+        const v = wpVideo.volume;
+        const off = wpVideo.muted || v === 0;
+        const ic = off ? ICON_VOL_X : (v < 0.5 ? ICON_VOL_1 : ICON_VOL_2);
+        if (ic !== lastVolIcon) { lastVolIcon = ic; speakerBtn.innerHTML = ic; }
+        speakerBtn.style.color = off ? '#ef4444' : '#fff';
+      }
+      renderVol();
+      speakerBtn.onclick = () => { wpVideo.muted = !wpVideo.muted; renderVol(); };
+      volSlider.oninput = e => {
+        const v = parseFloat(e.target.value);
+        wpVideo.volume = v;
+        if (v > 0 && wpVideo.muted) wpVideo.muted = false;
+        renderVol();
+      };
+      volContainer.appendChild(speakerBtn);
+      volContainer.appendChild(volSlider);
+
+      /* ---------- tela cheia ---------- */
+      const fsBtn = mkBtn('', 'Tela cheia', ICON_FS);
+      fsBtn.style.color = '#d4d4d8';
+
+      function updateFullscreenState() {
+        const isFS = !!document.fullscreenElement || !!document.webkitFullscreenElement;
+        if (isFS) {
+          fsBtn.innerHTML = ICON_FS_OFF;
+          fsBtn.style.color = GREEN;
+          chatBtn.style.display = 'flex';
+          if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+          setTimeout(() => { if (alive) loadChat(); }, 800);
+        } else {
+          fsBtn.innerHTML = ICON_FS;
+          fsBtn.style.color = '#d4d4d8';
+          closeChat();
+          chatBtn.style.display = 'none';
+          setTimeout(() => { if (alive) snapToEdge(); }, 100);
+        }
+      }
+      document.addEventListener('fullscreenchange', updateFullscreenState);
+      document.addEventListener('webkitfullscreenchange', updateFullscreenState);
+
+      fsBtn.onclick = () => {
+        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+          if (wpContainer.requestFullscreen) {
+            wpContainer.requestFullscreen().then(() => {
+              if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+            }).catch(() => {});
+          } else if (wpContainer.webkitRequestFullscreen) {
+            try { wpContainer.webkitRequestFullscreen(); } catch (e) {}
+          }
+        } else {
+          if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+          else if (document.webkitExitFullscreen) { try { document.webkitExitFullscreen(); } catch (e) {} }
+          if (screen.orientation && screen.orientation.unlock) { try { screen.orientation.unlock(); } catch (e) {} }
+        }
+      };
+
+      actions.appendChild(liveBtn);
+      actions.appendChild(volContainer);
+      actions.appendChild(chatBtn);
+      actions.appendChild(gearBtn);
+      actions.appendChild(fsBtn);
+      controls.appendChild(leftGroup);
+      controls.appendChild(actions);
+      vidWrapper.appendChild(controls);
+
+      let narrowState = null;
+      function applyLayout() {
+        const narrow = controls.clientWidth > 0 && controls.clientWidth < 440;
+        if (narrow === narrowState) return;
+        narrowState = narrow;
+        actions.classList.toggle('cs-narrow', narrow);
+      }
+      if (window.ResizeObserver) {
+        try { resizeObs = new ResizeObserver(applyLayout); resizeObs.observe(controls); } catch (e) { resizeObs = null; }
+      }
+      if (!resizeObs) addInterval(applyLayout, 1000);
+
+      let vvHandler = null;
+      if (window.visualViewport) {
+        vvHandler = () => {
+          if (isChatOpen) {
+            const keyboardHeight = window.innerHeight - window.visualViewport.height;
+            if (keyboardHeight > 50) chatPanel.style.height = (window.visualViewport.height - controls.clientHeight) + 'px';
+            else chatPanel.style.height = '100%';
+          }
+        };
+        window.visualViewport.addEventListener('resize', vvHandler);
+        window.visualViewport.addEventListener('scroll', vvHandler);
+      }
+
+      const syncDot = syncStatus.querySelector('span');
+      const liveDot = liveBtn.querySelector('span');
+      const GLOW = { '#eab308': '234,179,8', '#ef4444': '239,68,68', '#a1a1aa': '161,161,170', '#38bdf8': '56,189,248', '#53fc18': '83,252,24' };
+      const dotKeys = new Map();
+      function setDot(el, color) {
+        if (!el || dotKeys.get(el) === color) return;
+        dotKeys.set(el, color);
+        el.style.background = color;
+        el.style.boxShadow = '0 0 6px rgba(' + GLOW[color] + ',0.7)';
+      }
+      function updateStatus() {
+        let c = '#eab308';
+        if (connectionState === 'disconnected') {
+          c = '#ef4444';
+        } else if (connectionState === 'connected') {
+          const hasMovie = wpVideo.readyState > 0 || (wpVideo.duration && !isNaN(wpVideo.duration)) || !!currentUrl;
+          if (!hasMovie || wpVideo.paused) {
+            c = '#a1a1aa';
+          } else {
+            let expectedTime = lastServerTime;
+            if (isPlayingFromSocket && lastServerTime !== null) expectedTime += (performance.now() - lastServerTimeReceivedAt) / 1000;
+            let delay = 0;
+            if (expectedTime !== null) delay = Math.abs(wpVideo.currentTime - Math.max(0, expectedTime - viewerDelay));
+            c = delay >= 3 ? '#38bdf8' : '#53fc18';
+          }
+        }
+        setDot(syncDot, c);
+        if (menuOpen && tSync._c !== c) { tSync._c = c; tSync.s.textContent = SYNC_TXT[c]; tSync.s.style.color = c; }
+        try {
+          let liveDelay = 0;
+          if (nativeVideo.buffered && nativeVideo.buffered.length > 0) liveDelay = nativeVideo.buffered.end(nativeVideo.buffered.length - 1) - nativeVideo.currentTime;
+          setDot(liveDot, liveDelay >= 5 ? '#a1a1aa' : '#ef4444');
+        } catch (e) {}
+      }
+
+      let lastMutedRendered = nativeVideo.muted;
+      function renderMuteIfChanged() {
+        if (lastMutedRendered !== nativeVideo.muted) { lastMutedRendered = nativeVideo.muted; renderMute(); }
+      }
+      let tickN = 0;
+      addInterval(() => {
+        if (document.hidden) return;
+        renderMuteIfChanged();
+        if (controlsVisible) updateStatus();
+        if (++tickN % 3 === 0 && !nativeVideo.style.transform.includes('scale(')) nativeVideo.style.cssText = getZoomCSS();
+      }, 1000);
+      tMic.addEventListener('click', () => { lastMutedRendered = nativeVideo.muted; });
+
+      function showControls(force) {
+        const now = performance.now();
+        if (!force && controlsVisible && now - lastShowAt < 400) return;
+        lastShowAt = now;
+        if (!controlsVisible) {
+          controlsVisible = true;
+          controls.style.opacity = '1';
+          controls.style.pointerEvents = 'auto';
+          updateTime();
+          updateStatus();
+        }
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(autoHide, 4000);
+      }
+      function autoHide() {
+        if (menuOpen) { hideTimer = setTimeout(autoHide, 4000); return; }
+        hideControls();
+      }
+      function hideControls() {
+        closeMenu();
+        controlsVisible = false;
+        clearTimeout(hideTimer);
+        controls.style.opacity = '0';
+        controls.style.pointerEvents = 'none';
+      }
+      wpContainer.addEventListener('click', e => {
+        const t = e.target;
+        if (menuOpen && !menu.contains(t) && !gearBtn.contains(t) && !thumbWrapper.contains(t)) {
+          closeMenu();
+          if (!controls.contains(t)) { showControls(); return; }
+        }
+        if (menu.contains(t) || controls.contains(t)) { showControls(); return; }
+        if (thumbWrapper.contains(t) || chatPanel.contains(t)) return;
+        if (controlsVisible) hideControls(); else showControls();
+      });
+      controls.addEventListener('pointerdown', () => showControls());
+      volSlider.addEventListener('input', () => showControls());
+      wpContainer.addEventListener('keydown', () => showControls());
+      showControls(true);
+
+      if (parent) parent.appendChild(wpContainer);
+
+      /* ---------- miniplayer ---------- */
+      currentH = Math.round(currentW / cropCfg.aspect);
+      const thumbWrapper = document.createElement('div');
+      thumbWrapper.id = 'wp-thumb-wrapper';
+      thumbWrapper.style.cssText = 'position:absolute!important;top:0!important;left:0!important;width:' + currentW + 'px!important;height:' + currentH + 'px!important;z-index:9999!important;pointer-events:auto!important;cursor:grab!important;touch-action:none!important;will-change:transform!important;border-radius:' + RADIUS + 'px!important;box-shadow:0 3px 10px rgba(0,0,0,0.55)!important;transform:translate3d(0px, 0px, 0);';
+
+      const clipBox = document.createElement('div');
+      clipBox.style.cssText = 'position:absolute!important;top:0!important;left:0!important;width:100%!important;height:100%!important;border-radius:' + RADIUS + 'px!important;overflow:hidden!important;-webkit-clip-path:inset(0 round ' + RADIUS + 'px)!important;clip-path:inset(0 round ' + RADIUS + 'px)!important;background:#000!important;isolation:isolate!important;transform:translateZ(0);';
+      thumbWrapper.appendChild(clipBox);
+
+      try {
+        nativeVideo.style.cssText = getZoomCSS();
+        clipBox.appendChild(nativeVideo);
+      } catch (e) {}
+
+      safeLayer.appendChild(thumbWrapper);
+      renderMini();
+      wpVideo.muted = false;
+      setTimeout(() => { if (alive) { posX = EDGE; posY = EDGE; updateTransform(false); } }, 50);
+
+      let lastTapTime = 0;
+      thumbWrapper.addEventListener('click', e => {
+        if (isEditingCrop) { e.stopPropagation(); return; }
+        const now = Date.now();
+        const tapLength = now - lastTapTime;
+        if (tapLength < 300 && tapLength > 0) {
+          isExpanded = !isExpanded;
+          const screenW = vidWrapper.clientWidth, screenH = vidWrapper.clientHeight;
+          currentW = isExpanded ? largeW : smallW;
+          currentH = Math.round(currentW / cropCfg.aspect);
+          const maxLeft = screenW - currentW - EDGE, maxTop = screenH - currentH - EDGE;
+          if (posX > maxLeft) posX = Math.max(EDGE, maxLeft);
+          if (posY > maxTop) posY = Math.max(EDGE, maxTop);
+          updateTransform(true);
+          e.stopPropagation();
+        }
+        lastTapTime = now;
+      });
+
+      let isDragging = false, startX = 0, startY = 0, initialPosX = 0, initialPosY = 0;
+      let initialCropX = 0, initialCropY = 0;
+
+      thumbWrapper.addEventListener('pointerdown', e => {
+        isDragging = true;
+        startX = e.clientX; startY = e.clientY;
+        if (isEditingCrop) {
+          initialCropX = cropCfg.x;
+          initialCropY = cropCfg.y;
+          showControls();
+        } else {
+          initialPosX = posX; initialPosY = posY;
+          preChatPosX = null;
+          thumbWrapper.style.transition = 'none';
+        }
+        try { thumbWrapper.setPointerCapture(e.pointerId); } catch (err) {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+
+      thumbWrapper.addEventListener('pointermove', e => {
+        if (!isDragging) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+
+        if (isEditingCrop) {
+          // Move o conteúdo interno do vídeo baseado no arrasto
+          const sensitivity = 0.6;
+          cropCfg.x = Math.max(-150, Math.min(50, Math.round(initialCropX + dx * sensitivity)));
+          cropCfg.y = Math.max(-150, Math.min(50, Math.round(initialCropY + dy * sensitivity)));
+          slX.inp.value = cropCfg.x; slX.span.textContent = cropCfg.x + slX.unit;
+          slY.inp.value = cropCfg.y; slY.span.textContent = cropCfg.y + slY.unit;
+          applyCropStyle();
+          return;
+        }
+
+        posX = initialPosX + dx;
+        posY = initialPosY + dy;
+        const maxW = vidWrapper.clientWidth, maxH = vidWrapper.clientHeight;
+        posX = Math.max(EDGE, Math.min(maxW - currentW - EDGE, posX));
+        posY = Math.max(EDGE, Math.min(maxH - currentH - EDGE, posY));
+        if (!dragRaf) {
+          dragRaf = requestAnimationFrame(() => {
+            dragRaf = 0;
+            thumbWrapper.style.transform = 'translate3d(' + posX + 'px, ' + posY + 'px, 0)';
+          });
+        }
+      });
+
+      thumbWrapper.addEventListener('pointerup', e => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
+        try { thumbWrapper.releasePointerCapture(e.pointerId); } catch (err) {}
+        if (!isEditingCrop) snapToEdge();
+      });
+
+      thumbWrapper.addEventListener('pointercancel', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
+        if (!isEditingCrop) snapToEdge();
+      });
+
+      function loadVideo(url) {
+        if (!url || url === currentUrl) return;
+        lastSeekAt = -Infinity;
+        const isHls = url.indexOf('.m3u8') !== -1;
+        const H = getHls();
+        if (isHls && H && H.isSupported()) {
+          currentUrl = url;
+          if (hlsInstance) { try { hlsInstance.destroy(); } catch (e) {} }
+          hlsInstance = new H({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 20, maxMaxBufferLength: 40, backBufferLength: 20 });
+          const h = hlsInstance;
+          h.loadSource(url);
+          h.attachMedia(wpVideo);
+          h.on(H.Events.ERROR, (ev, data) => {
+            if (!data || !data.fatal) return;
+            try {
+              if (data.type === H.ErrorTypes.NETWORK_ERROR) h.startLoad();
+              else if (data.type === H.ErrorTypes.MEDIA_ERROR) h.recoverMediaError();
+              else { currentUrl = null; h.destroy(); }
+            } catch (e) {}
+          });
+        } else if (isHls && !H && !wpVideo.canPlayType('application/vnd.apple.mpegurl')) {
+          pendingUrl = url;
+        } else {
+          currentUrl = url;
+          if (hlsInstance) { try { hlsInstance.destroy(); } catch (e) {} hlsInstance = null; }
+          wpVideo.src = url;
+          wpVideo.load();
+        }
+      }
+
+      function seekTo(t, force) {
+        const now = performance.now();
+        if (!force && now - lastSeekAt < 5000) return;
+        lastSeekAt = now;
+        try { wpVideo.currentTime = t; } catch (e) {}
+      }
+
+      function connectSocket() {
+        connectionState = 'connecting';
+        socket = new WebSocket(SOCKET_URL);
+        const mySocket = socket;
+        mySocket.onopen = () => {
+          connectionState = 'connected';
+          mySocket.send(JSON.stringify({ type: 'JOIN', roomId: ROOM_ID }));
+        };
+        mySocket.onmessage = e => {
+          try {
+            const msg = JSON.parse(e.data);
+            const p = msg.payload || msg;
+            if (p.videoUrl) loadVideo(p.videoUrl);
+            const action = p.action || msg.action;
+            const serverTime = p.time !== undefined ? parseFloat(p.time) : null;
+            if (serverTime !== null && !isNaN(serverTime)) {
+              lastServerTime = serverTime;
+              lastServerTimeReceivedAt = performance.now();
+            }
+            const targetTime = (serverTime !== null && !isNaN(serverTime)) ? Math.max(0, serverTime - viewerDelay) : null;
+            if (action || targetTime !== null) {
+              if (action === 'PLAY') {
+                isPlayingFromSocket = true;
+                if (targetTime !== null && !wpVideo.seeking && Math.abs(wpVideo.currentTime - targetTime) > 3) seekTo(targetTime, false);
+                wpVideo.play().catch(() => {});
+              } else if (action === 'PAUSE') {
+                isPlayingFromSocket = false;
+                wpVideo.pause();
+                if (targetTime !== null && !wpVideo.seeking && Math.abs(wpVideo.currentTime - targetTime) > 2) seekTo(targetTime, true);
+              } else if (targetTime !== null && !wpVideo.seeking && Math.abs(wpVideo.currentTime - targetTime) > 3) {
+                seekTo(targetTime, false);
+              }
+            }
+          } catch (err) {}
+        };
+        mySocket.onclose = () => {
+          if (socket !== mySocket) return;
+          connectionState = 'reconnecting';
+          setTimeout(() => { if (alive && socket === mySocket) connectSocket(); }, 3000);
+        };
+        mySocket.onerror = () => { try { mySocket.close(); } catch (e) {} };
+      }
+
+      showControls(true);
+      wpVideo.muted = false;
+      renderVol();
+      applyLayout();
+      wpVideo.play().catch(() => {});
+      connectSocket();
+
+      if (!getHls()) {
+        try {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
+          s.onload = () => { if (pendingUrl) { const u = pendingUrl; pendingUrl = null; loadVideo(u); } };
+          document.head.appendChild(s);
+        } catch (e) {}
+      }
+
+      function cleanup() {
+        alive = false;
+        timers.forEach(clearInterval);
+        if (resizeObs) { try { resizeObs.disconnect(); } catch (e) {} resizeObs = null; }
+        clearTimeout(hideTimer);
+        if (dragRaf) { try { cancelAnimationFrame(dragRaf); } catch (e) {} dragRaf = 0; }
+        if (gRaf) { try { cancelAnimationFrame(gRaf); } catch (e) {} gRaf = 0; }
+        document.removeEventListener('fullscreenchange', updateFullscreenState);
+        document.removeEventListener('webkitfullscreenchange', updateFullscreenState);
+        if (vvHandler && window.visualViewport) {
+          window.visualViewport.removeEventListener('resize', vvHandler);
+          window.visualViewport.removeEventListener('scroll', vvHandler);
+        }
+        try {
+          if (document.fullscreenElement === wpContainer) document.exitFullscreen().catch(() => {});
+          else if (document.webkitFullscreenElement === wpContainer && document.webkitExitFullscreen) document.webkitExitFullscreen();
+          if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+        } catch (e) {}
+        restoreKickPage();
+        if (socket) {
+          socket.onclose = null; socket.onerror = null; socket.onmessage = null;
+          try { socket.close(); } catch (e) {}
+          socket = null;
+        }
+        if (hlsInstance) { try { hlsInstance.destroy(); } catch (e) {} hlsInstance = null; }
+        try { chatIframe.src = 'about:blank'; } catch (e) {}
+        try { wpVideo.pause(); wpVideo.removeAttribute('src'); wpVideo.load(); } catch (e) {}
+        try {
+          if (parent) parent.insertBefore(nativeVideo, (origNext && origNext.parentNode === parent) ? origNext : null);
+          if (origVideoStyle === null) nativeVideo.removeAttribute('style'); else nativeVideo.setAttribute('style', origVideoStyle);
+          if (parent) {
+            if (origParentStyle === null) parent.removeAttribute('style'); else parent.setAttribute('style', origParentStyle);
+          }
+        } catch (e) {}
+        wpContainer.remove();
+        try {
+          if (metaCreated) meta.remove();
+          else if (origMetaContent === null) meta.removeAttribute('content');
+          else meta.setAttribute('content', origMetaContent);
+        } catch (e) {}
+        if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+      }
+
+      session = { nativeVideo, parent, path: location.pathname, cleanup };
+    } catch (err) {
+      alert('Cine Sharkão - erro: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  function tick() {
+    if (!scriptEnabled) { removeKickBtn(); return; }
+    if (session && (!document.contains(session.parent) || location.pathname !== session.path)) stopSession();
+    ensureKickButton();
+  }
+
+  registerMenu();
+  setInterval(tick, 1000);
+  tick();
+})();
